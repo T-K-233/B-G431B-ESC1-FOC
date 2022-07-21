@@ -62,6 +62,8 @@ TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim7;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_rx;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
 
@@ -358,8 +360,8 @@ int main(void)
   foc_config.position_ki = 0.001;
   foc_config.position_ki_threshold = 100;
   foc_config.position_kd = 0.01;
-  foc_config.position_limit_lower = 0;
-  foc_config.position_limit_upper = 0;
+  foc_config.position_limit_lower = -0.25*M_PI*15;
+  foc_config.position_limit_upper = 0.75*M_PI*15;
 
   foc_config.velocity_kp = 0.2;
   foc_config.velocity_ki = 0.002;
@@ -1132,6 +1134,12 @@ static void MX_DMA_Init(void)
   __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
   /* DMA1_Channel3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
