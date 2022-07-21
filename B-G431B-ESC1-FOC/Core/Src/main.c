@@ -89,10 +89,13 @@ int32_t encoder_n_rotations;
 float input_pot;
 
 
-static FDCAN_RxHeaderTypeDef RxHeader;
-static uint8_t RxData[8];
-static FDCAN_TxHeaderTypeDef TxHeader;
-static uint8_t TxData[8];
+FDCAN_RxHeaderTypeDef can_rx_header;
+uint8_t can_rx_data[8];
+FDCAN_TxHeaderTypeDef can_tx_header;
+uint8_t can_tx_data[8];
+
+uint8_t serial_rx_buffer[32];
+uint8_t serial_tx_buffer[128];
 
 /* USER CODE END PV */
 
@@ -158,104 +161,141 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
   }
 }
 
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size) {
+  if (huart == &huart2) {
+    if (size == 11) {
+      can_rx_header.Identifier = ((uint32_t)serial_rx_buffer[0] << 8) | serial_rx_buffer[1];
+      can_rx_header.DataLength = serial_rx_buffer[2];
+      can_rx_data[0] = serial_rx_buffer[4];
+      can_rx_data[1] = serial_rx_buffer[5];
+      can_rx_data[2] = serial_rx_buffer[6];
+      can_rx_data[3] = serial_rx_buffer[7];
+      can_rx_data[4] = serial_rx_buffer[8];
+      can_rx_data[5] = serial_rx_buffer[9];
+      can_rx_data[6] = serial_rx_buffer[10];
+      can_rx_data[7] = serial_rx_buffer[11];
+
+      handleHostCommand();
+    }
+    HAL_UARTEx_ReceiveToIdle_DMA(&huart2, serial_rx_buffer, 12);
+  }
+}
+
 uint8_t getUserButton() {
   return HAL_GPIO_ReadPin(GPIO_BUTTON_GPIO_Port, GPIO_BUTTON_Pin) ? 0 : 1;
 }
 
 void handleHostCommand() {
-  char str[128];
 
-  uint8_t command = 0;
+  switch (can_rx_header.Identifier) {
+    case 0x08:  // mode control frame
+      if (can_rx_header.DataLength == 0) {
+        serial_tx_buffer[0] = 0x00;
+        serial_tx_buffer[1] = 0x08;
+        serial_tx_buffer[2] = 0x01;
+        serial_tx_buffer[0] = 0x00;  // UNUSED
+        serial_tx_buffer[4] = foc_config.mode;
+        HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, 12);
+        break;
+      }
+      switch (can_rx_data[0]) {
+        case FOC_MODE_CALIBRATION:  // calibration mode
+          sprintf((char *)serial_tx_buffer, "Start Calibration\n");
+          HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, strlen((char *)serial_tx_buffer));
+          FOC_runCalibrationSequence();
+          sprintf((char *)serial_tx_buffer, "Calibration Done!\n");
+          HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, strlen((char *)serial_tx_buffer));
+          break;
+        case FOC_MODE_TORQUE:  // torque mode
+          foc_config.mode = FOC_MODE_TORQUE;
+          sprintf((char *)serial_tx_buffer, "TORQUE mode\n");
+          HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, strlen((char *)serial_tx_buffer));
+          break;
+        case FOC_MODE_VELOCITY:  // velocity mode
+          foc_config.mode = FOC_MODE_VELOCITY;
+          sprintf((char *)serial_tx_buffer, "VELOCITY mode\n");
+          HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, strlen((char *)serial_tx_buffer));
+          break;
+        case FOC_MODE_POSITION:  // position mode
+          foc_config.mode = FOC_MODE_POSITION;
+          sprintf((char *)serial_tx_buffer, "POSITION mode\n");
+          HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, strlen((char *)serial_tx_buffer));
+          break;
+        default:  // idle mode
+          foc_config.mode = FOC_MODE_IDLE;
+          sprintf((char *)serial_tx_buffer, "IDLE mode\n");
+          HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, strlen((char *)serial_tx_buffer));
+          break;
+      }
+      break;
 
-  if (HAL_UART_Receive(&huart2, &command, 1, 1000) != HAL_OK) {
-    return;
+    case 0x20:  // currents info
+      break;
+
+    case 0x40:  // log position
+      if (can_rx_header.DataLength == 0) {
+        serial_tx_buffer[0] = 0x00;
+        serial_tx_buffer[1] = 0x40;
+        serial_tx_buffer[2] = 0x08;
+        serial_tx_buffer[0] = 0x00;  // UNUSED
+        ((float *)serial_tx_buffer)[1] = foc_param.position_setpoint;
+        ((float *)serial_tx_buffer)[2] = foc_param.position_measured;
+        HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, 12);
+        break;
+      }
+      break;
+    case 0x41:  // log velocity
+      if (can_rx_header.DataLength == 0) {
+        serial_tx_buffer[0] = 0x00;
+        serial_tx_buffer[1] = 0x41;
+        serial_tx_buffer[2] = 0x08;
+        serial_tx_buffer[0] = 0x00;  // UNUSED
+        ((float *)serial_tx_buffer)[1] = foc_param.velocity_setpoint;
+        ((float *)serial_tx_buffer)[2] = foc_param.velocity_measured;
+        HAL_UART_Transmit_DMA(&huart2, serial_tx_buffer, 12);
+        break;
+      }
   }
 
-  if (command == '0') {  // idle mode
-    foc_config.mode = FOC_MODE_IDLE;
-    sprintf(str, "IDLE mode\n");
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == '1') {  // position mode
-    sprintf(str, "Start Calibration\n");
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    FOC_runCalibrationSequence();
-    sprintf(str, "Calibration Done!\n");
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == '2') {  // torque mode
-    foc_config.mode = FOC_MODE_TORQUE;
-    sprintf(str, "TORQUE mode\n");
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == '3') {  // velocity mode
-    foc_config.mode = FOC_MODE_VELOCITY;
-    sprintf(str, "VELOCITY mode\n");
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == '4') {  // position mode
-    foc_config.mode = FOC_MODE_POSITION;
-    sprintf(str, "POSITION mode\n");
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == 'I') {  // log currents
-    sprintf(str, "%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
-        foc_param.phase_current_measured[0],
-        foc_param.phase_current_measured[1],
-        foc_param.phase_current_measured[2],
-        foc_param.i_alpha,
-        foc_param.i_beta,
-        foc_param.i_q,
-        foc_param.i_d);
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == 'V') {  // log voltages
-    sprintf(str, "%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
-        foc_param.phase_voltage_setpoint[0],
-        foc_param.phase_voltage_setpoint[1],
-        foc_param.phase_voltage_setpoint[2],
-        foc_param.v_alpha,
-        foc_param.v_beta,
-        foc_param.v_q,
-        foc_param.v_d,
-        foc_param.bus_voltage_measured);
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == 'p') {  // log position
-    sprintf(str, "%f\t%f\n",
-        foc_param.position_measured,
-        foc_param.position_setpoint
-        );
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == 'v') {  // log velocity
-    sprintf(str, "%f\t%f\n",
-        foc_param.velocity_measured,
-        foc_param.velocity_setpoint
-        );
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
-  if (command == 'G') {  // log general
-    sprintf(str, "%f\t%f\t%f\t%f\t%f\t%f\n",
-        foc_param.position_measured,
-        foc_param.position_setpoint,
-        foc_param.velocity_measured,
-        foc_param.velocity_setpoint,
-        foc_param.i_q,
-        foc_param.torque_setpoint
-        );
-    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
-    return;
-  }
+
+//  }
+//  if (command == 'I') {
+//    sprintf(str, "%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
+//        foc_param.phase_current_measured[0],
+//        foc_param.phase_current_measured[1],
+//        foc_param.phase_current_measured[2],
+//        foc_param.i_alpha,
+//        foc_param.i_beta,
+//        foc_param.i_q,
+//        foc_param.i_d);
+//    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
+//    return;
+//  }
+//  if (command == 'V') {  // log voltages
+//    sprintf(str, "%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
+//        foc_param.phase_voltage_setpoint[0],
+//        foc_param.phase_voltage_setpoint[1],
+//        foc_param.phase_voltage_setpoint[2],
+//        foc_param.v_alpha,
+//        foc_param.v_beta,
+//        foc_param.v_q,
+//        foc_param.v_d,
+//        foc_param.bus_voltage_measured);
+//    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
+//    return;
+//  }
+//  if (command == 'G') {  // log general
+//    sprintf(str, "%f\t%f\t%f\t%f\t%f\t%f\n",
+//        foc_param.position_measured,
+//        foc_param.position_setpoint,
+//        foc_param.velocity_measured,
+//        foc_param.velocity_setpoint,
+//        foc_param.i_q,
+//        foc_param.torque_setpoint
+//        );
+//    HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 1000);
+//    return;
+//  }
 }
 
 void CAN_init(void) {
@@ -290,15 +330,15 @@ void CAN_init(void) {
   }
 
   /* Prepare Tx Header */
-  TxHeader.Identifier = 0;
-  TxHeader.IdType = FDCAN_STANDARD_ID;
-  TxHeader.TxFrameType = FDCAN_DATA_FRAME;
-  TxHeader.DataLength = FDCAN_DLC_BYTES_8;
-  TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
-  TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
-  TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-  TxHeader.MessageMarker = 0;
+//  TxHeader.Identifier = 0;
+//  TxHeader.IdType = FDCAN_STANDARD_ID;
+//  TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+//  TxHeader.DataLength = FDCAN_DLC_BYTES_8;
+//  TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+//  TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
+//  TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
+//  TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+//  TxHeader.MessageMarker = 0;
 }
 
 
@@ -428,6 +468,9 @@ int main(void)
   foc_param.position_setpoint = 0;
 
   HAL_UART_Transmit(&huart2, (uint8_t *)"ready\n", strlen("ready\n"), 1000);
+
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, serial_rx_buffer, 12);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -454,7 +497,7 @@ int main(void)
       foc_param.velocity_setpoint = 0;
       foc_param.position_setpoint = input_pot * M_PI * 15;
     }
-    handleHostCommand();
+//    handleHostCommand();
     HAL_Delay(1);
   }
   /* USER CODE END 3 */
